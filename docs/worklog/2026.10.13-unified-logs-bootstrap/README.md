@@ -15,18 +15,24 @@ first business/operational decision needed before selecting infrastructure.
 - Read the supplied server specification and copied only redacted capacity and safety constraints into
   `docs/constraints/server-profile.md`.
 - Created the documentation-only project scaffold and secret-safe `.gitignore`.
-- Asked one architecture-shaping question in `docs/decision/requirements-question.md`.
+- Recorded the answer and expanded it into explicit priorities: agent context/time efficiency, remote
+  access, and minimal integration effort.
+- Compared no-domain/no-new-cost access and storage options, then recommended an SSH-backed MCP/CLI,
+  SQLite index, and compressed content-addressed artifacts.
+- Added the measured pilot plan, retention/compaction model, notification direction, acceptance criteria,
+  risks, and public source links in `docs/decision/architecture-proposal.md`.
 
 ## Checks
 
 | Command | Working directory | Result |
 |---|---|---|
-| `git diff --cached --check` | `project-logs/` | passed |
+| `git diff --cached --check` | `project-logs/` | passed for the initial commit |
+| `git diff --check` | `project-logs/` | passed after the requirements update |
 
 No application checks exist yet because this phase contains documentation only. No server changes were
 made and no credentials were copied.
 
 ## Next step
 
-Use the answer to `docs/decision/requirements-question.md` to produce an architecture comparison with a
-small first vertical slice and explicit acceptance checks.
+Review `docs/decision/architecture-proposal.md`. If the direction is accepted, implement only the first
+vertical slice: server-side ingestion/query plus `tldr-digest` and `research-workspace` adapters.

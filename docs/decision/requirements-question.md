@@ -1,21 +1,32 @@
-# One decision before architecture selection
+# Requirements decision
 
-The first architecture choice is not the database or language. It is what the system must guarantee when
-the workstation and server are not simultaneously available.
+The first architecture choice was settled on 2026-10-13. The requirement is about agent work, not human
+operations: a useful investigation should take as few context-consuming reads and tool calls as possible.
 
-## Question
+## Recorded priorities
 
-**Which guarantee should be mandatory for version 1? Choose one primary priority:**
+1. **Context and time efficiency for the AI agent.** A single query should return a compact diagnosis,
+   grouped failures, relevant timeline, and pointers to large payloads. The agent must not read raw logs
+   line by line merely to understand what happened.
+2. **Remote agent access.** Logs from capable projects should reach the server and be queryable remotely.
+   The server is the default operational access point.
+3. **Minimal integration effort.** Connecting another project should require a small adapter or wrapper,
+   not a new logging design.
 
-1. **Remote agent access first.** Logs from capable projects should reach the server and be queryable by
-   cloud agents with minimal delay. Local-only and restricted projects may use an export queue.
-2. **Local ownership first.** Logs remain local by default and are sent to the server only by explicit,
-   controlled export. Remote access is useful but secondary to data locality and offline operation.
-3. **Minimal integration first.** Adding logging to a project should take almost no project-specific work;
-   the server view may be incomplete or delayed until stronger adapters exist.
+## Constraints and preferences
 
-This choice determines whether the first design should be push/queue-centric, local-first with replication,
-or adapter/collector-centric. It also sets the acceptable failure mode when the remote path is unavailable.
+- No owned domain is available or expected.
+- No additional paid services are acceptable.
+- The existing server is available and is the preferred place for remote access.
+- Logs may contain arbitrary payloads, including long text, images, and files.
+- Old payloads should be compacted, summarized, deduplicated, compressed, or deleted when necessary.
+- Final retention policy is intentionally undecided; it may combine age and disk-size limits.
+- Notifications to the owner by Telegram and/or email are desirable.
+- Existing VPN services, ports, firewall rules, and resource limits remain protected.
 
-Reply with `1`, `2`, or `3`, plus any hard requirement that changes the choice (for example: retention,
-private-network-only access, or a ban on sending payload text).
+## Consequence
+
+The proposal should be a server-centered, agent-oriented log store with a query layer that produces
+summaries first and exposes raw content only on demand. It should use SSH as the initial remote transport,
+because this avoids a new public port and does not depend on a domain. Clients that cannot connect directly
+should have a durable export/spool path.

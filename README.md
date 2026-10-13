@@ -16,9 +16,9 @@ and resumable investigation over dashboards or process ceremonies.
 
 ## Current phase
 
-**Discovery and architecture selection.** No logging infrastructure or application code has been chosen
-yet. The initial inventory and server constraints are recorded in `docs/` without copying credentials.
-The next architecture proposal depends on the answer in `docs/decision/requirements-question.md`.
+**Requirements settled; architecture proposal in progress.** The initial inventory, server constraints,
+and user priorities are recorded in `docs/` without copying credentials. The proposed first implementation
+is in `docs/decision/architecture-proposal.md`.
 
 ## Initial evidence
 
@@ -34,6 +34,14 @@ The next architecture proposal depends on the answer in `docs/decision/requireme
 3. A server-side collection/query path that remote AI agents can reach safely.
 4. Local fallback behavior for projects that cannot or should not use a network connection.
 5. Operational checks that prove logs are present, useful, bounded, and free of credentials.
+
+## Current recommendation
+
+Use the server as a private log hub reached through SSH, with a small SQLite-based index, compressed
+filesystem artifacts, and an agent-oriented query command/MCP surface. Return compact diagnoses and
+precomputed summaries first; fetch full content only when the investigation needs it. Keep journald and
+existing project-local logs as inputs or fallbacks rather than making every project depend on a network
+collector.
 
 ## Non-goals for the discovery phase
 
