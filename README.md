@@ -38,10 +38,10 @@ is in `docs/decision/architecture-proposal.md`.
 ## Current recommendation
 
 Use the server as a private log hub reached through SSH, with a small SQLite-based index, compressed
-filesystem artifacts, and an agent-oriented query command/MCP surface. Return compact diagnoses and
-precomputed summaries first; fetch full content only when the investigation needs it. Keep journald and
+filesystem artifacts, and an agent-oriented query command/MCP surface. Return compact tables and
+deterministic aggregates first; fetch full content only when the investigation needs it. Keep journald and
 existing project-local logs as inputs or fallbacks rather than making every project depend on a network
-collector.
+collector. LLM processing is optional and outside the core path.
 
 ## Non-goals for the discovery phase
 

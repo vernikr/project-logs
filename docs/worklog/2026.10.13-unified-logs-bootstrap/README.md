@@ -21,6 +21,9 @@ first business/operational decision needed before selecting infrastructure.
   SQLite index, and compressed content-addressed artifacts.
 - Added the measured pilot plan, retention/compaction model, notification direction, acceptance criteria,
   risks, and public source links in `docs/decision/architecture-proposal.md`.
+- Revised the proposal after requirements discussion: removed mandatory LLM/prose generation, made
+  TSV-like output and read-only SQL first-class, added project views over `fields_json`, documented SSH
+  credential handling and resource estimates, and reordered the pilot projects.
 
 ## Checks
 
@@ -34,5 +37,5 @@ made and no credentials were copied.
 
 ## Next step
 
-Review `docs/decision/architecture-proposal.md`. If the direction is accepted, implement only the first
-vertical slice: server-side ingestion/query plus `tldr-digest` and `research-workspace` adapters.
+Review `docs/decision/architecture-proposal.md`. Development is intentionally not started yet; the next
+implementation decision is the first vertical slice and its acceptance checks.
