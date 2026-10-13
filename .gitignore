@@ -1,0 +1,17 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+logs/
+runtime/
+tmp/
+.cache/
+.venv/
+node_modules/
+dist/
+coverage/
+
+# Local research inputs may contain credentials or operational data.
+private/
+secrets/
