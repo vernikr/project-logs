@@ -40,6 +40,10 @@ first business/operational decision needed before selecting infrastructure.
 - Added the useful low-overhead ideas from the earlier proposal: a small cross-language logger surface,
   per-project event catalogues, one-step `logs` commands and `fields` discovery, `doctor` end-to-end probes,
   systemd `OnFailure` fast alerts plus periodic absence rules, and compact TSV/hybrid output modes.
+- Added the latest requirements clarification: distinguish application, emitter/adapter, common-schema,
+  project-schema, and ingestion versions; use NDJSON as the canonical client interchange format; compare
+  TSV, hybrid/logfmt, NDJSON+jq/rg, and SQL as agent-facing read adapters; and treat field order as a
+  renderer/schema policy rather than an AGENTS.md-only convention.
 
 ## Checks
 

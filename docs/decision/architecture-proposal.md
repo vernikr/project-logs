@@ -107,6 +107,63 @@ across HTTP and MCP boundaries. A span helper can emit start/finish, outcome, an
 without every project reimplementing that boilerplate. Environment switches may select level, destination,
 run ID, and content capture, but secrets must not be passed as command-line arguments.
 
+### Format layers: write, store, and agent read
+
+The canonical client event format should be **UTF-8 NDJSON**: one complete JSON object per line. It is the
+right interchange format for this zoo of clients because it preserves types, supports streaming and partial
+failure, survives new fields, works with stdout/files/HTTPS, and is easy to retry idempotently. It is not
+chosen because it is the most context-efficient format for an agent.
+
+The layers should remain separate:
+
+| Layer | Preferred format | Reason |
+|---|---|---|
+| client → spool/shipper/gateway | NDJSON | stable typed event envelope and streaming transport |
+| index | SQLite rows + `fields_json` | SQL, indexes, FTS5, project views |
+| large content | separate artifact bytes | binary safety, deduplication, range reads, retention |
+| hub → agent | rendered compact text, SQL result, or raw NDJSON | choose the cheapest reliable representation for the task |
+
+SQL is a query language, not a client log format. TSV, hybrid `key=value`, and raw NDJSON are **read
+adapters** over the same stored events. Keeping the write format stable lets an agent add instrumentation
+without changing every downstream reader, while stable event/field names let the agent become familiar with
+the domain.
+
+The pilot should compare these read adapters on the same real fixtures:
+
+1. fixed-shape TSV with native agent reading;
+2. hybrid/logfmt output with `rg`/shell filtering;
+3. raw NDJSON with `jq`/`rg`;
+4. read-only SQL with bounded TSV or JSON output.
+
+Measure context tokens, number of tool calls, wall time, parse mistakes, follow-up queries, and whether the
+needed evidence was found. The result should become a small central agent guide and MCP `format`/budget
+defaults, not a different logging design per project. Project `AGENTS.md` files should contain only a short
+pointer to `logs help`/`logs schema`; the renderer and schema registry remain the source of truth.
+
+### Version fields and field order
+
+Every event should identify both the application and the emitter that produced it:
+
+- `project_version` — version/commit of the application or project;
+- `emitter` and `emitter_version` — logging library, adapter, or legacy parser version;
+- `schema_version` — common envelope version;
+- `project_schema_version` — version of the project's event catalogue;
+- optional `ingest_version` — server parser/indexer version, added at ingestion rather than trusted from the client.
+
+This distinguishes “the application changed” from “the logging adapter changed” and makes later migration
+of event structure auditable.
+
+Field order is a soft optimization, not semantics. The canonical serialized event should put dense and
+correlation-critical fields first: time, event ID, project/host/runtime, component/level/event, run and
+operation IDs, outcome/duration, version fields, common query fields, message/error pointers, project fields,
+and artifact references last. Large bodies never appear inline in the default event.
+
+For rendered tables, columns should be chosen per result shape: high-coverage common fields first, sparse
+project fields later, and important-but-sparse fields (such as an HTTP status in an error table) kept near the
+front when they answer the query. A single universal column order for heterogeneous events is worse than
+several small typed tables or the hybrid renderer. The order should be defined by the schema/renderer, with
+`AGENTS.md` documenting only the principle; agents must not depend on JSON object ordering.
+
 ### 2. Upload/spool path
 
 Every client first writes to a durable local or runtime-specific sink. It must not make the main product
@@ -161,12 +218,12 @@ logical fields are:
 | `ts` | UTC event time |
 | `project`, `runtime`, `environment` | cross-project filtering |
 | `host`, `source` | where the event was produced and which sink delivered it |
-| `project_version`, `process_id` | version and process context when available |
+| `project_version`, `emitter`, `emitter_version`, `process_id` | application, adapter, and process context |
 | `component`, `event`, `level` | stable event classification |
 | `run_id`, `operation_id`, `parent_id` | investigation correlation |
 | `outcome`, `attempt`, `duration_ms` | lifecycle and performance evidence |
 | `message`, `error_type`, `error_ref` | optional short text and structured error pointer |
-| `schema_version`, `project_schema_version` | evolution of the common and project contracts |
+| `schema_version`, `project_schema_version`, `ingest_version` | evolution of common, project, and server contracts |
 | `fields_json` | typed project-specific fields that may change frequently |
 | `content_ref`, `content_kind`, `content_bytes`, `content_hash` | optional payload pointer |
 | `payload_state` | raw, compressed, extracted, deduplicated, deleted |
@@ -600,6 +657,7 @@ The slice should include:
 - one read-only SQL query over a project view;
 - one SSH-backed MCP/CLI invocation and one authenticated HTTPS probe from Figma's UI iframe;
 - one stdio-MCP project whose stdout remains protocol-clean;
+- the same fixture rendered as TSV, hybrid/logfmt, NDJSON, and SQL output, with an agent-efficiency comparison;
 - compaction in dry-run mode;
 - a Telegram test notification using a placeholder/configured secret only when the user supplies it.
 
