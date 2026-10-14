@@ -1,6 +1,6 @@
 # Architecture proposal: server-centered agent log hub
 
-**Status:** revised after requirements discussion; recommended for a measured pilot, not yet deployed
+**Status:** revised after external review and network research; recommended for a measured pilot, not yet deployed
 **Date:** 2026-10-14
 **Primary objective:** let an AI agent inspect cross-project runtime evidence with as few remote reads and
 as little repeated field markup as possible.
@@ -11,18 +11,29 @@ Build a small self-hosted **log hub** on the existing server:
 
 ```text
 project runtime
-  → local structured event adapter or stdout/journald bridge
+  → local durable sink (stdout/journald, spool, or browser queue)
   → durable batch/spool
-  → SSH upload to the server
+  → SSH or authenticated HTTPS transport
   → SQLite event index + FTS5 search
   → compressed/deduplicated artifact store
-  → compact tabular query command and MCP server over SSH stdio
+  → compact tabular query command, HTTPS API, and MCP server over SSH stdio
   → bounded evidence, aggregates, and on-demand payload pointers
 ```
 
-The first version should not expose a new public HTTP port. A cloud agent that already has SSH access can
-start the remote MCP process with one SSH command. The server can accept uploads through SSH on the existing
-port. This avoids a domain, TLS provisioning, firewall changes, and another internet-facing service.
+SSH remains the simplest private/admin path and the fallback transport. The network research changes one
+earlier assumption: a public HTTPS path is technically feasible without buying a domain. The practical
+hostname is `38.244.152.2.sslip.io`, with a normal trusted certificate and a free port such as `8443`; port
+`80` can be reserved for HTTP-01 renewal. The existing `443`, `20724`, `2096`, and `51820/udp` services are
+not reused. This path is needed for browser runtimes and for cloud agents that cannot launch SSH-backed
+MCP, but it must expose a deliberately limited authenticated gateway rather than the raw database.
+
+The proposal therefore has two access profiles:
+
+- **private profile:** SSH-backed CLI/MCP, suitable for administration, SQL, and sensitive raw artifacts;
+- **remote profile:** authenticated HTTPS API for ingestion and bounded queries from cloud/browser clients.
+
+The public profile is a design option for the pilot, not permission to change the server immediately. Its
+TLS, authentication, rate limits, CORS, and low-disk behavior must be tested before exposure.
 
 The first implementation should be a small Python service/CLI using the standard library where practical:
 
@@ -31,7 +42,8 @@ The first implementation should be a small Python service/CLI using the standard
 - gzip from the standard library as the guaranteed compression fallback, with optional zstd only when it is
   already available and measured to be useful;
 - systemd for the collector/compaction/notification jobs;
-- journald as an input and operational fallback, not as the cross-project query interface.
+- journald as the default server-side buffer, not as the cross-project query interface;
+- a small HTTPS gateway only if the browser/cloud access tests require it.
 
 This is deliberately smaller than Grafana/Loki/Elasticsearch and more specialized for the actual user:
 one owner, AI-operated projects, low server capacity, no new paid services, and a need to minimize agent
@@ -74,15 +86,24 @@ the central schema.
 
 ### 2. Upload/spool path
 
-The default workstation path is one bounded spool plus one SSH batch upload:
+Every client first writes to a durable local or runtime-specific sink. It must not make the main product
+fail because the hub or network is unavailable. The sink differs by runtime, but the event batch and
+idempotency rules stay the same:
 
 ```text
-project → ~/.local/state/project-logs/spool/<batch>.ndjson[.gz]
-       → ssh agent@server logctl ingest --stdin
+server service → stdout JSON → journald → cursor-based shipper
+Mac process    → local spool → SSH or HTTPS batch upload
+Chrome         → extension storage queue → HTTPS upload when available
+Figma          → UI iframe → HTTPS upload, with exported-journal fallback
 ```
 
 If the server is unavailable, the project continues locally and the spool retries later. Upload is
 idempotent by event ID and content hash, so retrying a batch does not duplicate events or attachments.
+
+For Mac processes the uploader is an external launchd job or explicit `logctl ship` command, not code that
+each project reimplements. It should send only non-empty batches, persist a cursor/acknowledgement, and
+avoid opening a new SSH session for every event. The exact cadence and connection reuse are implementation
+choices to benchmark; a 30-second SSH login loop is not a requirement.
 
 The application does not contain an SSH private key. It invokes the normal SSH client, which obtains
 credentials from the machine's `ssh-agent`, `~/.ssh/config`, or an externally configured secret in the
@@ -90,13 +111,21 @@ agent environment. Private keys must never be stored in this repository, embedde
 as command-line values, or written to logs. The server may use separate restricted credentials for ingest
 and read access.
 
-Server-local projects can write directly to the hub or use journald ingestion. Restricted runtimes keep
-their local export behavior until a safe transport exists:
+Server-local projects use stdout/journald as the default path. A direct loopback ingestion path may be an
+optimization later, but it must not create a second durability model for ordinary services. In particular,
+an MCP server whose stdout is a JSON-RPC wire protocol must never write ordinary logs to stdout; it uses
+stderr, journald, a file sink, or a dedicated descriptor instead.
 
-- Figma remains offline and exports a journal;
-- Chrome extension snapshots can continue through the existing `runtime/logs` mechanism, with a later
-  server pull/bridge;
+Restricted runtimes have a direct HTTPS option plus a local fallback:
+
+- Figma's network-capable UI iframe can post to the HTTPS gateway. The plugin's main code remains network
+  independent, and a downloaded/exported journal remains the fallback when the gateway is unavailable.
+- Chrome extensions can post directly with `host_permissions`, while their existing bounded local journal
+  remains the retry queue and diagnostic view.
 - a browser or plugin must never be made dependent on the collector just to complete its main work.
+
+The current Figma project has `networkAccess.allowedDomains: ["none"]`; enabling direct delivery would be
+a deliberate project change, not an assumption hidden in the shared library.
 
 ### 3. Event index
 
@@ -108,6 +137,7 @@ logical fields are:
 | `event_id` | idempotency and exact lookup |
 | `ts` | UTC event time |
 | `project`, `runtime`, `environment` | cross-project filtering |
+| `host`, `source` | where the event was produced and which sink delivered it |
 | `component`, `event`, `level` | stable event classification |
 | `run_id`, `operation_id`, `parent_id` | investigation correlation |
 | `outcome`, `attempt`, `duration_ms` | lifecycle and performance evidence |
@@ -119,6 +149,15 @@ logical fields are:
 
 SQLite FTS5 indexes event names, messages or error text supplied by the project, selected string fields,
 and extracted text previews. It does not need to index raw images or arbitrary binary files.
+
+The initial SQLite operating rules are part of the design, not deployment trivia: WAL mode for concurrent
+readers, a bounded busy timeout, one serialized writer or ingest queue, read-only query connections, and
+streaming artifact reads. The public HTTPS gateway must not open an unbounded number of writer connections.
+
+One shared database is still the default at the expected pilot volume. Month-partitioned databases remain an
+option if measured growth or metadata retention makes deletion and backup expensive; partitioning from day
+one would make arbitrary SQL and cross-period project views less intuitive. The decision should follow a
+representative volume/concurrency benchmark rather than a generic rule.
 
 The shared table is the source of truth. It is not split into one physical database per project. Each
 project can have a logical namespace through a view, for example:
@@ -159,6 +198,8 @@ The planned project views follow the pilot's actual variety rather than forcing 
 
 These are examples of fields worth exposing, not a fixed schema. Logging can add a new field immediately to
 `fields_json`; the view is updated only when repeated agent queries show that a flat column is worthwhile.
+Promoted fields should receive generated columns or expression indexes where query volume justifies them;
+otherwise the expected JSON scan cost should be accepted explicitly rather than hidden.
 
 ### 4. Artifact store
 
@@ -177,9 +218,11 @@ useful properties without buying object storage:
 
 For text payloads, the hub should retain a bounded preview and, where useful, deterministic extracted text
 or repeated-content statistics. For images and arbitrary files, it should retain metadata and, where local
-tools support it, a thumbnail or OCR/text extraction. A semantic description is optional and must not be
-required for ingestion or querying. The hub must not require an LLM call for every payload: that would add
-quota usage, latency, and another failure path.
+tools support it, a thumbnail or OCR/text extraction. The pilot should not require OCR, thumbnails, or
+semantic descriptions: those are optional later processing jobs. The minimum artifact record is a stable
+reference, MIME/type, original byte count, hash, preview/range information, and lifecycle state. The hub
+must not require an LLM call for every payload: that would add quota usage, latency, and another failure
+path.
 
 ### 5. Retention and compaction
 
@@ -193,14 +236,16 @@ Recommended lifecycle:
 ```text
 hot: raw event + payload
   → warm: compressed/deduplicated payload + preview + metadata
-  → compact: event metadata + error signature + counts + content hash
+  → compact: event metadata + content hash
   → expired: delete payload; retain only the compact event if policy allows
 ```
 
 The first pilot should make these limits configurable and report what it would delete before enabling
-automatic deletion. A sensible starting policy is to preserve compact event metadata much longer than raw
-payloads, with raw content governed by both age and free-disk reserve. The exact days and bytes are a user
-decision after measuring real growth.
+automatic deletion. A sensible starting policy is to preserve event metadata longer than raw payloads, with
+raw content governed by both age and free-disk reserve. The exact days and bytes are a user decision after
+measuring real growth. Do not promise semantic compaction before there is a tested deterministic operation
+that performs it; compression, deduplication, previewing, and deletion are sufficient for the first storage
+slice.
 
 When content is compacted, the record must say what happened. The agent should never mistake “payload was
 deleted” for “no payload existed”. Semantic summaries, if ever added, are an optional artifact type rather
@@ -211,6 +256,21 @@ than a prerequisite for the compact history.
 The primary operation should be a deterministic **evidence bundle**, not a project-specific diagnosis. A
 better name than `investigate` for the first version is `inspect-run`: it selects the standard facts around
 a run or operation and leaves interpretation to the agent.
+
+The companion zero-argument command should be a fleet overview. It answers a different question: which
+projects have been active, which have emitted errors, and which expected source has gone silent. This needs a
+small project schedule/heartbeat registry; absence cannot be inferred from an empty event query alone.
+
+```text
+logs
+logs errors --since 6h
+logs tail --project gemini-mcp --limit 20
+logs inspect-run --project tldr-digest --run run-001
+logs sql "SELECT ..."
+logs show event-123
+logs artifact artifact-456 --max-bytes 12000
+logs doctor
+```
 
 ```text
 inspect-run(
@@ -254,7 +314,10 @@ logctl sql ... --format json
 `inspect-run` may include deterministic aggregates such as counts, first/last timestamps, durations,
 explicitly logged outcomes, and grouped technical error signatures. It must not compose an `answer` sentence
 for every project. It must not infer `partial` merely because some errors exist when the project did not log
-an outcome.
+an outcome. Constant fields should be hoisted into a header, timestamps shortened when the scope makes that
+safe, and consecutive identical events collapsed with an explicit count and time span. Any tabs, newlines,
+or delimiters in values must be escaped unambiguously. These are output rules to benchmark on real logs, not
+claims that TSV is universally better than every hybrid format.
 
 SQL is a first-class interface, not an escape hatch:
 
@@ -298,6 +361,33 @@ cloud agent MCP client
 This is also easy to test with the CLI and does not depend on a DNS name. If a future agent platform cannot
 launch an SSH-backed MCP process, the same `logctl inspect-run --format tsv` command can be called through a
 single remote execution step.
+
+### Remote HTTPS gateway
+
+The network research shows that SSH is not the only feasible external path. A future gateway can use
+`https://38.244.152.2.sslip.io:8443` with a trusted certificate issued for the hostname. The research's
+staging tests demonstrate the HTTP-01 route and Figma's hostname acceptance, while the production certificate
+and renewal job still need one controlled live verification. An IP-address certificate is not the preferred
+choice: it is short-lived (160 hours according to Let's Encrypt), and Figma rejects the IP literal in the
+plugin manifest. The `sslip.io` hostname is a third-party DNS dependency and must be treated as such.
+
+The gateway is not a public database interface. At minimum it needs separate capabilities:
+
+- **ingest:** append-only, project-scoped, rate- and size-limited;
+- **compact read:** bounded overview/query results;
+- **raw read:** separate, more restricted artifact access;
+- **administration:** SSH only.
+
+The Figma UI iframe has a null origin, so a direct browser path requires `Access-Control-Allow-Origin: *`
+and correct preflight handling for an `Authorization` header. The write credential must be considered
+extractable from a client-side plugin and therefore must not grant read or administration access. Chrome
+extensions can use host permissions and keep their local journal as a retry queue. Cloud agents can use the
+HTTPS query path when SSH-backed MCP is unavailable. No browser client should be allowed to issue arbitrary
+SQL without a separate authenticated, bounded capability.
+
+The gateway may be implemented by the application or a small reverse proxy; the choice is deliberately open
+until a resource and certificate-renewal probe. The design must not assume that a public port is harmless:
+the current server firewall is inactive, so a listener bound to all interfaces is internet-facing.
 
 The following standard operations remain useful:
 
@@ -370,13 +460,14 @@ The absence of a domain is not a blocker for the recommended private path:
 - no new public port or firewall change is required;
 - read access should use a restricted server account and a forced command/profile where practical;
 - write access should be separated from query access if different project credentials are introduced;
-- event payloads may contain secrets by user choice, so the raw-artifact operation must be more restricted
-  than the compact investigation operation;
+- event payloads may contain sensitive material by user choice, so raw-artifact access must be more restricted
+  than compact investigation access;
 - local event IDs and content hashes prevent accidental duplication but are not access controls.
 
-Do not use the existing VPN or proxy ports for the log service. A future public HTTPS option is technically
-possible, including an IP-address certificate path, but it is not needed for v1 and would compete with the
-server's reserved port layout. A private SSH-backed MCP path is simpler and safer.
+Do not use the existing VPN or proxy ports for the log service. Public HTTPS, if enabled, uses a free port
+such as `8443` and the `sslip.io` hostname; it does not replace SSH for administration. The system must also
+decide whether raw content may be returned through the public profile. Storing arbitrary content and exposing
+arbitrary content to every remote client are separate decisions.
 
 ## Deployment shape
 
@@ -450,7 +541,8 @@ The slice should include:
 - one compressed/deduplicated text artifact;
 - the `inspect-run` response with TSV-like tables, deterministic aggregates, and a bounded timeline;
 - one read-only SQL query over a project view;
-- one SSH-backed MCP/CLI invocation;
+- one SSH-backed MCP/CLI invocation and one authenticated HTTPS probe;
+- one stdio-MCP project whose stdout remains protocol-clean;
 - compaction in dry-run mode;
 - a Telegram test notification using a placeholder/configured secret only when the user supplies it.
 
@@ -471,7 +563,10 @@ The pilot is useful only if all of these are demonstrated with real project-shap
 7. The server refuses ingestion or pauses retention work before disk safety limits are crossed.
 8. The existing `tldr-digest` behavior and `research-workspace` checks still pass.
 9. Telegram notification deduplication prevents repeated alerts for the same incident.
-10. SSH/MCP access works without a domain, new public port, or modification of protected VPN services.
+10. SSH/MCP access works without a domain or modification of protected VPN services.
+11. If public HTTPS is enabled, certificate renewal, CORS/preflight, scoped tokens, rate limits, and
+    low-disk behavior are tested before browser/cloud use.
+12. Ordinary logs never corrupt a stdio MCP protocol stream.
 
 ## Risks and mitigations
 
@@ -490,8 +585,13 @@ The pilot is useful only if all of these are demonstrated with real project-shap
 - exact raw/compact retention days and disk reserve;
 - whether compact event metadata is retained indefinitely;
 - whether images receive OCR/thumbnails automatically or only on demand;
+- whether the public profile may return raw artifacts, or only compact metadata/previews;
+- whether periodic independent backup is mandatory, and whether its destination may be a private GitHub repository;
+- whether the first public transport uses `38.244.152.2.sslip.io:8443` or remains SSH-only until the browser tests;
+- which credentials/capabilities are available to cloud-agent sandboxes and browser clients;
 - whether `yt-summary` continues using GitHub as a transport or gains a workstation-side uploader;
 - whether cloud-agent environments can reliably launch SSH-backed MCP servers;
+- whether event metadata needs time partitioning after the volume/concurrency benchmark;
 - whether the measured event volume justifies VictoriaLogs or another index.
 
 ## Sources checked
@@ -503,9 +603,15 @@ to use those products:
 - [VictoriaLogs data ingestion](https://docs.victoriametrics.com/victorialogs/data-ingestion/)
 - [VictoriaLogs querying](https://docs.victoriametrics.com/victorialogs/querying/)
 - [VictoriaLogs FAQ](https://docs.victoriametrics.com/victorialogs/faq/)
+- [SQLite WAL](https://www.sqlite.org/wal.html)
+- [SQLite ATTACH DATABASE](https://www.sqlite.org/lang_attach.html)
+- [Figma network requests](https://developers.figma.com/docs/plugins/making-network-requests/)
+- [Figma plugin manifest](https://developers.figma.com/docs/plugins/manifest/)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
 - [Tailscale Funnel documentation](https://tailscale.com/docs/features/tailscale-funnel)
 - [Let's Encrypt IP address certificates](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability)
 
 The local project evidence and server limits are recorded in `docs/research/active-projects.md` and
-`docs/constraints/server-profile.md`.
+`docs/constraints/server-profile.md`. The network-specific evidence supplied for this revision is in
+`/Users/vernikr/Downloads/RESEARCH.md`; its live-server measurements were also spot-checked read-only on
+2026-10-14 and should be treated as a dated audit, not evergreen capacity guarantees.

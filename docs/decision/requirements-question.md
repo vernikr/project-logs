@@ -27,7 +27,9 @@ operations: a useful investigation should take as few context-consuming reads an
 ## Consequence
 
 The proposal should be a server-centered, agent-oriented log store with a query layer that produces compact
-tables and deterministic aggregates first and exposes raw content only on demand. It should use SSH as the
-initial remote transport, because this avoids a new public port and does not depend on a domain. Clients
-that cannot connect directly should have a durable export/spool path. LLM processing should remain optional,
-not a requirement for ingestion or analysis.
+tables and deterministic aggregates first and exposes raw content only on demand. SSH should remain the
+private/admin transport. The supplied network research shows that authenticated HTTPS on a free port with
+the `38.244.152.2.sslip.io` hostname is feasible for browser runtimes and cloud agents that cannot use SSH;
+it must be treated as a separate, restricted gateway rather than as direct database access. Clients that
+cannot connect directly should have a durable export/spool path. LLM processing should remain optional, not
+a requirement for ingestion or analysis.

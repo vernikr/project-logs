@@ -37,11 +37,12 @@ is in `docs/decision/architecture-proposal.md`.
 
 ## Current recommendation
 
-Use the server as a private log hub reached through SSH, with a small SQLite-based index, compressed
-filesystem artifacts, and an agent-oriented query command/MCP surface. Return compact tables and
-deterministic aggregates first; fetch full content only when the investigation needs it. Keep journald and
-existing project-local logs as inputs or fallbacks rather than making every project depend on a network
-collector. LLM processing is optional and outside the core path.
+Use the server as a small SQLite-based log hub with compressed filesystem artifacts and an agent-oriented
+query command/MCP surface. SSH remains the private/admin path; authenticated HTTPS on a free port is a
+possible second path for cloud agents and browser runtimes, using `38.244.152.2.sslip.io` rather than a
+purchased domain. Return compact tables and deterministic aggregates first; fetch full content only when
+the investigation needs it. Keep journald and existing project-local queues as fallbacks. LLM processing is
+optional and outside the core path.
 
 ## Non-goals for the discovery phase
 
