@@ -33,3 +33,10 @@ the `38.244.152.2.sslip.io` hostname is feasible for browser runtimes and cloud 
 it must be treated as a separate, restricted gateway rather than as direct database access. Clients that
 cannot connect directly should have a durable export/spool path. LLM processing should remain optional, not
 a requirement for ingestion or analysis.
+
+## Follow-up decisions
+
+- Public raw-artifact access: undecided; the default public profile exposes compact data only.
+- Independent periodic backup: deferred; local spools are retry buffers, not a backup guarantee.
+- Direct browser delivery: selected for the Figma UI iframe in the pilot, with export fallback and no network
+  dependency in the plugin's main execution path.

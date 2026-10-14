@@ -35,6 +35,11 @@ first business/operational decision needed before selecting infrastructure.
   and `51820/udp` remained occupied by existing services, UFW was inactive, available memory was about
   564 MiB, journal usage was 110 MiB, the `tldr-digest` timer was active, and no Caddy/nginx/Tailscale/
   Cloudflare/fail2ban/rsyslog service was active. These are dated observations, not permanent assumptions.
+- Recorded owner decisions: raw-artifact access through public HTTPS remains undecided; independent backup is
+  deferred; direct Figma UI-iframe delivery through HTTPS is part of the pilot with export fallback.
+- Added the useful low-overhead ideas from the earlier proposal: a small cross-language logger surface,
+  per-project event catalogues, one-step `logs` commands and `fields` discovery, `doctor` end-to-end probes,
+  systemd `OnFailure` fast alerts plus periodic absence rules, and compact TSV/hybrid output modes.
 
 ## Checks
 

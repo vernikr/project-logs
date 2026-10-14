@@ -1,6 +1,6 @@
 # Architecture proposal: server-centered agent log hub
 
-**Status:** revised after external review and network research; recommended for a measured pilot, not yet deployed
+**Status:** revised after external review, network research, and owner decisions; recommended for a measured pilot, not yet deployed
 **Date:** 2026-10-14
 **Primary objective:** let an AI agent inspect cross-project runtime evidence with as few remote reads and
 as little repeated field markup as possible.
@@ -32,8 +32,10 @@ The proposal therefore has two access profiles:
 - **private profile:** SSH-backed CLI/MCP, suitable for administration, SQL, and sensitive raw artifacts;
 - **remote profile:** authenticated HTTPS API for ingestion and bounded queries from cloud/browser clients.
 
-The public profile is a design option for the pilot, not permission to change the server immediately. Its
-TLS, authentication, rate limits, CORS, and low-disk behavior must be tested before exposure.
+The public profile is part of the pilot because direct Figma delivery was selected. It is not permission to
+change the server immediately: its TLS, authentication, rate limits, CORS, and low-disk behavior must be
+tested before exposure. The public profile is compact-read/ingest only by default; access to raw artifacts
+over HTTPS remains deliberately undecided.
 
 The first implementation should be a small Python service/CLI using the standard library where practical:
 
@@ -83,6 +85,27 @@ The adapter owns correlation IDs and local durability. It should be possible to 
 replacing its current logger or changing its user-facing output. The event contract must tolerate new
 project fields: an agent can add more detailed logging during a bug investigation without first changing
 the central schema.
+
+The intended onboarding surface is deliberately small and consistent across Python and JavaScript:
+
+```text
+logger = get_logger(project, component)
+logger.info("fetch_ok", http_status=200, duration_ms=120)
+logger.error("fetch_failed", error=exc, attempt=3)
+with logger.span("summarize", model=model):
+    ...
+```
+
+This is a target for thin adapters, not a requirement to replace every existing logger. Python
+`logging.Handler`, Node/browser adapters, and shell wrappers should preserve current user-facing output and
+route structured records to the nearest durable sink. A small per-project `docs/logging.md` should catalogue
+stable event names and important fields; it should not need to describe every incidental debug message.
+
+The common adapter should generate a compact sortable event ID (ULID or equivalent) and, when appropriate,
+a run ID; inherit an existing run ID from the environment; and propagate run/parent-operation correlation
+across HTTP and MCP boundaries. A span helper can emit start/finish, outcome, and duration consistently
+without every project reimplementing that boilerplate. Environment switches may select level, destination,
+run ID, and content capture, but secrets must not be passed as command-line arguments.
 
 ### 2. Upload/spool path
 
@@ -138,9 +161,11 @@ logical fields are:
 | `ts` | UTC event time |
 | `project`, `runtime`, `environment` | cross-project filtering |
 | `host`, `source` | where the event was produced and which sink delivered it |
+| `project_version`, `process_id` | version and process context when available |
 | `component`, `event`, `level` | stable event classification |
 | `run_id`, `operation_id`, `parent_id` | investigation correlation |
 | `outcome`, `attempt`, `duration_ms` | lifecycle and performance evidence |
+| `message`, `error_type`, `error_ref` | optional short text and structured error pointer |
 | `schema_version`, `project_schema_version` | evolution of the common and project contracts |
 | `fields_json` | typed project-specific fields that may change frequently |
 | `content_ref`, `content_kind`, `content_bytes`, `content_hash` | optional payload pointer |
@@ -149,6 +174,10 @@ logical fields are:
 
 SQLite FTS5 indexes event names, messages or error text supplied by the project, selected string fields,
 and extracted text previews. It does not need to index raw images or arbitrary binary files.
+
+Common cross-project field names should be preferred when their meaning is stable: `http_status`,
+`url_host`, `model`, `tool`, and `attempt` are examples. Project-specific fields remain valid in
+`fields_json`; the common list is a query convenience, not a restriction on instrumentation.
 
 The initial SQLite operating rules are part of the design, not deployment trivia: WAL mode for concurrent
 readers, a bounded busy timeout, one serialized writer or ingest queue, read-only query connections, and
@@ -257,15 +286,22 @@ The primary operation should be a deterministic **evidence bundle**, not a proje
 better name than `investigate` for the first version is `inspect-run`: it selects the standard facts around
 a run or operation and leaves interpretation to the agent.
 
-The companion zero-argument command should be a fleet overview. It answers a different question: which
-projects have been active, which have emitted errors, and which expected source has gone silent. This needs a
-small project schedule/heartbeat registry; absence cannot be inferred from an empty event query alone.
+The user-facing command is tentatively named `logs`; `logctl` is reserved for the internal/server entry
+point if a distinction is useful. The companion zero-argument command should be a fleet overview. It answers
+a different question: which projects have been active, which have emitted errors, and which expected source
+has gone silent. This needs a small project schedule/heartbeat registry; absence cannot be inferred from an
+empty event query alone.
+
+The same `logs` command should work on the VPS, Mac, and a cloud environment when installed. Without a local
+installation, an agent should be able to use the same subcommands through `ssh logs@server ...` or the
+authenticated HTTPS API. This avoids a separate project-specific discovery process for every environment.
 
 ```text
 logs
 logs errors --since 6h
 logs tail --project gemini-mcp --limit 20
 logs inspect-run --project tldr-digest --run run-001
+logs fields --project gemini-mcp
 logs sql "SELECT ..."
 logs show event-123
 logs artifact artifact-456 --max-bytes 12000
@@ -310,6 +346,12 @@ machine processing:
 logctl inspect-run ... --format json
 logctl sql ... --format json
 ```
+
+For fixed-shape tables such as the home view, grouped errors, and statistics, TSV is the preferred compact
+format. Mixed event streams may need a measured hybrid: a small positional prefix for time/level/event and
+escaped `key=value` fields for sparse project data. The CLI may choose automatically based on sparsity, while
+`--tsv`, `--kv`, `--wide`, `--full`, and `--json` remain explicit overrides. The choice must be validated on
+real logs for parsing errors as well as token count.
 
 `inspect-run` may include deterministic aggregates such as counts, first/last timestamps, durations,
 explicitly logged outcomes, and grouped technical error signatures. It must not compose an `answer` sentence
@@ -362,9 +404,9 @@ This is also easy to test with the CLI and does not depend on a DNS name. If a f
 launch an SSH-backed MCP process, the same `logctl inspect-run --format tsv` command can be called through a
 single remote execution step.
 
-### Remote HTTPS gateway
+### Pilot remote HTTPS gateway
 
-The network research shows that SSH is not the only feasible external path. A future gateway can use
+The network research shows that SSH is not the only feasible external path. The pilot gateway can use
 `https://38.244.152.2.sslip.io:8443` with a trusted certificate issued for the hostname. The research's
 staging tests demonstrate the HTTP-01 route and Figma's hostname acceptance, while the production certificate
 and renewal job still need one controlled live verification. An IP-address certificate is not the preferred
@@ -375,7 +417,7 @@ The gateway is not a public database interface. At minimum it needs separate cap
 
 - **ingest:** append-only, project-scoped, rate- and size-limited;
 - **compact read:** bounded overview/query results;
-- **raw read:** separate, more restricted artifact access;
+- **raw read:** separate, more restricted artifact access; public raw access is not selected for now;
 - **administration:** SSH only.
 
 The Figma UI iframe has a null origin, so a direct browser path requires `Access-Control-Allow-Origin: *`
@@ -397,6 +439,10 @@ The following standard operations remain useful:
 - `tail` for a narrow recent window;
 - `schema` for common fields and project views;
 - `health` for collector, spool, disk, and retention state.
+
+`doctor` should perform a small end-to-end probe: write a marked test event, confirm local durability and
+server acknowledgement, read it back through the selected access path, and report queue/disk/auth status.
+It must not silently claim success when only local serialization was tested.
 
 None of these operations requires an LLM. A future optional operation may ask a configured external model to
 summarize one selected text artifact, but it is outside the ingestion and query path and must tolerate quota
@@ -425,6 +471,16 @@ can match:
 - a rate-limit/authentication/bot-wall class;
 - a spool backlog or low disk condition;
 - a deployment health check failure.
+
+Two detection paths are useful and complementary:
+
+1. **Immediate service failure:** systemd `OnFailure=` can invoke a small notifier with the unit name,
+   exit status, and a bounded recent journal excerpt. This path should work even when the log index is down.
+2. **Periodic rules:** a timer evaluates recent events and expected heartbeats/runs, with a state file for
+   deduplication, cooldown, repeat interval, and absence alerts.
+
+The notifier message should contain only a compact incident description, identifiers, counts, and a ready
+`logs ...` drill-down command. It must not paste a large log or artifact into Telegram/email.
 
 The recommended first channel is **Telegram Bot API**: it is free, needs no domain, and only requires a bot
 token plus the owner's chat ID. The notifier should send a compact alert with project, event class, run ID,
@@ -530,7 +586,8 @@ Do not onboard all projects at once. Prove the value with the two easiest and mo
    cross-project correlation.
 3. `size-report`: capture external CLI/process runs without changing stdout or stderr contracts.
 4. `biblio-mcp`: capture metadata-only tool operations and large-file references.
-5. `figma-safe-resets`: accept an offline exported journal without making the plugin network-dependent.
+5. `figma-safe-resets`: send from the UI iframe to the authenticated HTTPS gateway, while retaining an
+   offline exported journal as fallback and keeping the main plugin code network-independent.
 6. `browser-agent` and `browser-agent-mcp`: capture long-lived browser sessions, actions, screenshots/files,
    and MCP transport boundaries.
 
@@ -541,7 +598,7 @@ The slice should include:
 - one compressed/deduplicated text artifact;
 - the `inspect-run` response with TSV-like tables, deterministic aggregates, and a bounded timeline;
 - one read-only SQL query over a project view;
-- one SSH-backed MCP/CLI invocation and one authenticated HTTPS probe;
+- one SSH-backed MCP/CLI invocation and one authenticated HTTPS probe from Figma's UI iframe;
 - one stdio-MCP project whose stdout remains protocol-clean;
 - compaction in dry-run mode;
 - a Telegram test notification using a placeholder/configured secret only when the user supplies it.
@@ -564,9 +621,10 @@ The pilot is useful only if all of these are demonstrated with real project-shap
 8. The existing `tldr-digest` behavior and `research-workspace` checks still pass.
 9. Telegram notification deduplication prevents repeated alerts for the same incident.
 10. SSH/MCP access works without a domain or modification of protected VPN services.
-11. If public HTTPS is enabled, certificate renewal, CORS/preflight, scoped tokens, rate limits, and
-    low-disk behavior are tested before browser/cloud use.
-12. Ordinary logs never corrupt a stdio MCP protocol stream.
+11. The Figma UI iframe can deliver a test event through HTTPS with correct certificate, CORS/preflight,
+    scoped write token, rate limits, and local fallback behavior.
+12. The public gateway refuses or pauses ingestion before disk safety limits are crossed.
+13. Ordinary logs never corrupt a stdio MCP protocol stream.
 
 ## Risks and mitigations
 
@@ -586,8 +644,9 @@ The pilot is useful only if all of these are demonstrated with real project-shap
 - whether compact event metadata is retained indefinitely;
 - whether images receive OCR/thumbnails automatically or only on demand;
 - whether the public profile may return raw artifacts, or only compact metadata/previews;
-- whether periodic independent backup is mandatory, and whether its destination may be a private GitHub repository;
-- whether the first public transport uses `38.244.152.2.sslip.io:8443` or remains SSH-only until the browser tests;
+- independent periodic backup is deliberately deferred; local spools are retry buffers, not a backup promise;
+- the exact TLS terminator and certificate-renewal arrangement for the selected
+  `38.244.152.2.sslip.io:8443` pilot endpoint;
 - which credentials/capabilities are available to cloud-agent sandboxes and browser clients;
 - whether `yt-summary` continues using GitHub as a transport or gains a workstation-side uploader;
 - whether cloud-agent environments can reliably launch SSH-backed MCP servers;
